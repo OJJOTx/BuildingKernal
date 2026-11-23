@@ -11,7 +11,7 @@ from pathlib import Path
 VALID_TRACKS = ("4.19-r25p0", "4.19-r32p1", "4.14-r25p0")
 
 
-def _clean_makefile_extraversion(kernel_dir: Path) -> None:
+def _clean_version_markers(kernel_dir: Path) -> None:
     mk = kernel_dir / "Makefile"
     text = mk.read_text(encoding="utf-8")
     new_text, count = re.subn(r"(?m)^EXTRAVERSION\s*=.*$", "EXTRAVERSION =", text, count=1)
@@ -20,6 +20,16 @@ def _clean_makefile_extraversion(kernel_dir: Path) -> None:
     if new_text != text:
         mk.write_text(new_text, encoding="utf-8")
         print(f"[PATCH] Cleaned EXTRAVERSION in {mk}")
+
+    for lv in sorted(kernel_dir.glob("localversion*")):
+        if lv.is_file():
+            lv.unlink()
+            print(f"[PATCH] Removed {lv.name} from {kernel_dir}")
+
+    scm = kernel_dir / ".scmversion"
+    if not scm.exists() or scm.read_text(encoding="utf-8") != "":
+        scm.write_text("", encoding="utf-8")
+        print(f"[PATCH] Wrote empty .scmversion in {kernel_dir}")
 
 
 def _patch_419_mali_r25p0(kernel_dir: Path) -> None:
@@ -110,7 +120,7 @@ def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
 def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) -> None:
     if track not in VALID_TRACKS:
         raise ValueError(f"Unknown track {track!r}; expected one of {VALID_TRACKS}")
-    _clean_makefile_extraversion(kernel_dir)
+    _clean_version_markers(kernel_dir)
     if track == "4.19-r25p0":
         _patch_419_mali_r25p0(kernel_dir)
     elif track == "4.14-r25p0" and enable_414_spoof:

@@ -39,6 +39,9 @@ env:
   CLANG_VERSION: ${{ inputs.clang_version || 'r487747c' }}
   ENABLE_414_SPOOF: ${{ inputs.enable_414_bpfload_uname_spoof || 'false' }}
 
+permissions:
+  contents: write
+
 jobs:
   build-kernel:
     runs-on: ubuntu-22.04
@@ -185,6 +188,23 @@ jobs:
           name: rosemary-kernel-${{ env.TRACK }}
           path: dist/
           retention-days: 30
+
+      - name: Publish public GitHub Release for direct download
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="kernel-${{ env.TRACK }}-r${{ github.run_number }}"
+          tar -czf "rosemary-kernel-${{ env.TRACK }}.tar.gz" -C dist .
+          gh release create "$TAG" \
+            dist/Image.gz \
+            dist/mt6785.dtb \
+            dist/config.txt \
+            dist/BUILD_INFO.txt \
+            dist/SHA256SUMS.txt \
+            "rosemary-kernel-${{ env.TRACK }}.tar.gz" \
+            --title "Rosemary Kernel ${{ env.TRACK }} (Run #${{ github.run_number }})" \
+            --notes-file dist/BUILD_INFO.txt
 
       - name: Upload failure diagnostic build log
         if: failure() && hashFiles('build.log') != ''
