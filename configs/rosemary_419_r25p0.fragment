@@ -10,6 +10,8 @@ CONFIG_LOCALVERSION="-perf"
 # CONFIG_IKHEADERS is not set
 # CONFIG_KALLSYMS_ALL is not set
 # CONFIG_DEBUG_INFO is not set
+# Match lineage-22.2 rosemary_defconfig so non-fatal worker oopses don't hard-reboot
+# CONFIG_PANIC_ON_OOPS is not set
 
 CONFIG_MTK_GPU_VERSION="mali bifrost r25p0"
 

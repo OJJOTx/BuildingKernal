@@ -137,10 +137,68 @@ def _patch_419_mt6785_dts_swtp(kernel_dir: Path) -> None:
         raise RuntimeError(f"Could not find swtp/swtp_1 block in {dts}")
 
 
+def _patch_adsp_excep_bounds(kernel_dir: Path) -> None:
+    """Fix OOB read in adsp_exception_dump() when ADSP shared coredump strings lack NUL terminator."""
+    excep = kernel_dir / "drivers/misc/mediatek/adsp/mt6785/adsp_excep.c"
+    if not excep.is_file():
+        raise FileNotFoundError(f"Expected adsp_excep.c missing: {excep}")
+    text = excep.read_text(encoding="utf-8")
+    if "strnstr((const char *)coredump->assert_log" in text and "%.*s" in text:
+        print(f"[PATCH] adsp_excep.c bounds checks already present in {excep}")
+        return
+
+    new_text = text.replace(
+        "strstr(coredump->assert_log, ADSP_TEST_EE_PATTERN)",
+        "strnstr((const char *)coredump->assert_log, ADSP_TEST_EE_PATTERN, sizeof(coredump->assert_log))",
+    )
+
+    old_block = (
+        '\tn += snprintf(detail + n, ADSP_AED_STR_LEN - n, "%s %s\\n",\n'
+        '\t\t      pdata->name, aed_type);\n'
+        '\tif (coredump) {\n'
+        '\t\tn += snprintf(detail + n, ADSP_AED_STR_LEN - n,\n'
+        '\t\t\t      "adsp pc=0x%08x,exccause=0x%x,excvaddr=0x%x\\n",\n'
+        '\t\t\t      coredump->pc,\n'
+        '\t\t\t      coredump->exccause,\n'
+        '\t\t\t      coredump->excvaddr);\n'
+        '\t\tn += snprintf(detail + n, ADSP_AED_STR_LEN - n,\n'
+        '\t\t\t      "CRDISPATCH_KEY:ADSP exception/%s\\n",\n'
+        '\t\t\t      coredump->task_name);\n'
+        '\t\tn += snprintf(detail + n, ADSP_AED_STR_LEN - n, "%s",\n'
+        '\t\t\t      coredump->assert_log);\n'
+        '\t}'
+    )
+    new_block = (
+        '\tmemset(detail, 0, sizeof(detail));\n'
+        '\tn += scnprintf(detail + n, sizeof(detail) - n, "%s %s\\n",\n'
+        '\t\t       pdata->name, aed_type);\n'
+        '\tif (coredump) {\n'
+        '\t\tn += scnprintf(detail + n, sizeof(detail) - n,\n'
+        '\t\t\t       "adsp pc=0x%08x,exccause=0x%x,excvaddr=0x%x\\n",\n'
+        '\t\t\t       coredump->pc,\n'
+        '\t\t\t       coredump->exccause,\n'
+        '\t\t\t       coredump->excvaddr);\n'
+        '\t\tn += scnprintf(detail + n, sizeof(detail) - n,\n'
+        '\t\t\t       "CRDISPATCH_KEY:ADSP exception/%.*s\\n",\n'
+        '\t\t\t       (int)sizeof(coredump->task_name),\n'
+        '\t\t\t       coredump->task_name);\n'
+        '\t\tn += scnprintf(detail + n, sizeof(detail) - n, "%.*s",\n'
+        '\t\t\t       (int)sizeof(coredump->assert_log),\n'
+        '\t\t\t       coredump->assert_log);\n'
+        '\t}'
+    )
+    if old_block not in new_text:
+        raise RuntimeError(f"Could not match snprintf block in {excep}")
+    new_text = new_text.replace(old_block, new_block, 1)
+    excep.write_text(new_text, encoding="utf-8")
+    print(f"[PATCH] Fixed OOB string reads in {excep}")
+
+
 def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) -> None:
     if track not in VALID_TRACKS:
         raise ValueError(f"Unknown track {track!r}; expected one of {VALID_TRACKS}")
     _clean_version_markers(kernel_dir)
+    _patch_adsp_excep_bounds(kernel_dir)
     if track == "4.19-r25p0":
         _patch_419_mali_r25p0(kernel_dir)
         _patch_419_mt6785_dts_swtp(kernel_dir)
