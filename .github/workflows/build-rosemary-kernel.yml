@@ -104,6 +104,10 @@ jobs:
         run: |
           git clone --depth=1 --branch "${{ steps.track-vars.outputs.branch }}" \
             https://github.com/LineageOS/android_kernel_xiaomi_mt6785.git kernel-src
+          if [ "${{ steps.track-vars.outputs.branch }}" = "lineage-23.2" ]; then
+            git -C kernel-src fetch --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_mt6785.git lineage-24.0
+            git -C kernel-src checkout FETCH_HEAD -- drivers/misc/mediatek/cameraisp/owe
+          fi
 
       - name: Apply track patches
         run: |

@@ -32,6 +32,68 @@ def _clean_version_markers(kernel_dir: Path) -> None:
         print(f"[PATCH] Wrote empty .scmversion in {kernel_dir}")
 
 
+def _patch_419_ufs_bootdevice_rename(kernel_dir: Path) -> None:
+    """Restore 4.14 ufs-mtk.c 'bootdevice' platform device rename in 4.19 ufs-mediatek.c.
+
+    Stock rosemary first_stage_ramdisk (fstab.mt6785) and untouched stock V14.0.11.0.TKLMIXM
+    vendor_a (fstab.mt6785, init.mt6785.rc, ueventd.rc, nvram/ccci daemons) require
+    /dev/block/platform/bootdevice/by-name/* symlinks, which Android init/ueventd only
+    populates when 11270000.ufshci's sysfs platform device is renamed to 'bootdevice'
+    (matching ro.boot.boot_devices=bootdevice,...).
+    """
+    ufs_c = kernel_dir / "drivers/scsi/ufs/ufs-mediatek.c"
+    if not ufs_c.is_file():
+        raise FileNotFoundError(f"Expected ufs-mediatek.c missing: {ufs_c}")
+    text = ufs_c.read_text(encoding="utf-8")
+    if "ufs_mtk: renamed to bootdevice" in text:
+        print(f"[PATCH] bootdevice rename already present in {ufs_c}")
+        return
+
+    inc_anchor = "#include <linux/rpmb.h>\n"
+    if inc_anchor not in text:
+        raise RuntimeError(f"Could not find include anchor in {ufs_c}")
+    text = text.replace(
+        inc_anchor,
+        inc_anchor + "#include <linux/slab.h>\n#include <linux/string.h>\n",
+        1,
+    )
+
+    probe_old = (
+        "\t/* Add get_boot_type check and return ENODEV if not ufs boot */\n"
+        "\tboot_type = ufs_mtk_get_boot_type();\n"
+        "\tif (boot_type != BOOTDEV_UFS)\n"
+        "\t\treturn -ENODEV;\n"
+        "\n"
+        "\t/* perform generic probe */"
+    )
+    probe_new = (
+        "\t/* Add get_boot_type check and return ENODEV if not ufs boot */\n"
+        "\tboot_type = ufs_mtk_get_boot_type();\n"
+        "\tif (boot_type != BOOTDEV_UFS)\n"
+        "\t\treturn -ENODEV;\n"
+        "\n"
+        "\t/* Match 4.14 ufs-mtk.c & mtk-sd.c UAF-safe rename so ueventd populates\n"
+        "\t * /dev/block/platform/bootdevice/by-name/* for first_stage_mount & vendor_a.\n"
+        "\t */\n"
+        "\tif (strcmp(dev_name(dev), \"bootdevice\") != 0) {\n"
+        "\t\tconst char *dup_name = kstrdup(pdev->name, GFP_KERNEL);\n"
+        "\n"
+        "\t\tpdev->name = dup_name;\n"
+        "\t\tif (!device_rename(dev, \"bootdevice\"))\n"
+        "\t\t\tdev_info(dev, \"ufs_mtk: renamed to bootdevice\\n\");\n"
+        "\t\tpdev->name = pdev->dev.kobj.name;\n"
+        "\t\tkfree_const(dup_name);\n"
+        "\t}\n"
+        "\n"
+        "\t/* perform generic probe */"
+    )
+    if probe_old not in text:
+        raise RuntimeError(f"Could not match ufs_mtk_probe block in {ufs_c}")
+    text = text.replace(probe_old, probe_new, 1)
+    ufs_c.write_text(text, encoding="utf-8")
+    print(f"[PATCH] Added UAF-safe 'bootdevice' rename to ufs_mtk_probe in {ufs_c}")
+
+
 def _patch_419_mali_r25p0(kernel_dir: Path) -> None:
     midgard = kernel_dir / "drivers/gpu/mediatek/gpu_mali/mali_bifrost/mali-r25p0/drivers/gpu/arm/midgard"
     if not midgard.is_dir():
@@ -91,6 +153,278 @@ def _patch_419_mali_r25p0(kernel_dir: Path) -> None:
         plat_mk.write_text(plat_txt, encoding="utf-8")
         print(f"[PATCH] Fixed platform include paths in {plat_mk}")
 
+    # 4. Restore Bifrost DT compatible on mali@13040000 so mali-r25p0 kbase_dt_ids[] probes /dev/mali0
+    dts = kernel_dir / "arch/arm64/boot/dts/mediatek/mt6785.dts"
+    dts_txt = dts.read_text(encoding="utf-8")
+    valhall_compat = '\tmali@13040000 {\n\t\tcompatible =\n\t\t\t"mediatek,mali", "arm,mali-valhall";'
+    bifrost_compat = (
+        '\tmali@13040000 {\n\t\tcompatible =\n\t\t\t"mediatek,mali", "arm,mali-midgard", "arm,mali-bifrost";'
+    )
+    if valhall_compat in dts_txt:
+        dts_txt = dts_txt.replace(valhall_compat, bifrost_compat, 1)
+        dts.write_text(dts_txt, encoding="utf-8")
+        print(f"[PATCH] Restored 'arm,mali-midgard', 'arm,mali-bifrost' compatible on mali@13040000 in {dts}")
+    elif bifrost_compat in dts_txt:
+        print(f"[PATCH] mali@13040000 Bifrost compatible already present in {dts}")
+    else:
+        raise RuntimeError(f"Could not match mali@13040000 compatible block in {dts}")
+
+
+def _patch_419_mt6785_dts_rosemary_compat(kernel_dir: Path) -> None:
+    """Ensure 4.19 mt6785.dts merges cleanly with untouched stock 4.14 dtbo_a and retains 4.19 board props."""
+    dts = kernel_dir / "arch/arm64/boot/dts/mediatek/mt6785.dts"
+    if not dts.is_file():
+        raise FileNotFoundError(f"Expected mt6785.dts missing: {dts}")
+    text = dts.read_text(encoding="utf-8")
+    orig = text
+
+    # 1. Uncomment swtp / swtp_1 / ant_check / ant_check_div symbols required by stock dtbo_a __fixups__
+    pattern = re.compile(
+        r"/\*\s*\n(\s*//add for swtp by longcheer begin[\s\S]*?ant_check_div\s*\{[\s\S]*?\};\s*)\n\s*\*/"
+    )
+    m = pattern.search(text)
+    if m:
+        text = text[: m.start()] + m.group(1) + text[m.end() :]
+        print(f"[PATCH] Uncommented swtp/swtp_1/ant_check nodes in {dts}")
+    elif "swtp: swtp {" not in text or "swtp_1: swtp_1 {" not in text:
+        raise RuntimeError(f"Could not find swtp/swtp_1 block in {dts}")
+
+    # 2. Apply 4.19 rosemary.dts PE+/PD charger properties directly to base lk_charger & charger nodes
+    lk_old = "\tlk_charger: lk_charger {\n\t\tcompatible = \"mediatek,lk_charger\";\n\t\tenable_anime;\n\t\t/* enable_pe_plus; */"
+    lk_new = "\tlk_charger: lk_charger {\n\t\tcompatible = \"mediatek,lk_charger\";\n\t\tenable_anime;\n\t\tenable_pe_plus;"
+    if lk_old in text:
+        text = text.replace(lk_old, lk_new, 1)
+
+    chg_old = (
+        "\t\tenable_sw_jeita;\n"
+        "\t\t/* enable_pe_plus; */\n"
+        "\t\t/* enable_pe_2; */\n"
+        "\t\t/* enable_pe_3; */\n"
+        "\t\t/* enable_pe_4; */"
+    )
+    chg_new = (
+        "\t\tenable_sw_jeita;\n"
+        "\t\tenable_pe_plus;\n"
+        "\t\tenable_pe_2;\n"
+        "\t\t/* enable_pe_3; */\n"
+        "\t\tenable_pe_4;\n"
+        "\t\tpd_vbus_upper_bound = <12000000>;"
+    )
+    if chg_old in text:
+        text = text.replace(chg_old, chg_new, 1)
+
+    # 3. Add 4.19 rosemary.dts keypad GPIO80 pinctrl default to mt6785.dts
+    haptic_end = "}; /* HAPTIC GPIO Settings -End */"
+    kpd_snippet = (
+        "\n\n&keypad {\n"
+        "\tpinctrl-names = \"default\";\n"
+        "\tpinctrl-0 = <&kpd_pins_default>;\n"
+        "};\n\n"
+        "&pio {\n"
+        "\tkpd_pins_default: kpdgpiodefault {\n"
+        "\t\tpins_cmd_dat {\n"
+        "\t\t\tpinmux = <PINMUX_GPIO80__FUNC_BPI_BUS8>;\n"
+        "\t\t\tbias-pull-up = <MTK_PUPD_SET_R1R0_10>;\n"
+        "\t\t\tinput-enable;\n"
+        "\t\t\tinput-schmitt-enable;\n"
+        "\t\t};\n"
+        "\t};\n"
+        "};"
+    )
+    if "kpd_pins_default: kpdgpiodefault" not in text:
+        if haptic_end not in text:
+            raise RuntimeError(f"Could not find HAPTIC GPIO anchor in {dts}")
+        text = text.replace(haptic_end, haptic_end + kpd_snippet, 1)
+
+    if text != orig:
+        dts.write_text(text, encoding="utf-8")
+        print(f"[PATCH] Updated rosemary charger & keypad DT properties in {dts}")
+
+    # 4. Match 4.19 rosemary.dts mt6360_pmic pwr_off_seq
+    mt6360_dtsi = kernel_dir / "arch/arm64/boot/dts/mediatek/v1/mt6360.dtsi"
+    if mt6360_dtsi.is_file():
+        m_txt = mt6360_dtsi.read_text(encoding="utf-8")
+        if "pwr_off_seq = [06 04 00 02];" in m_txt:
+            mt6360_dtsi.write_text(
+                m_txt.replace("pwr_off_seq = [06 04 00 02];", "pwr_off_seq = [04 00 00 02];", 1),
+                encoding="utf-8",
+            )
+            print(f"[PATCH] Updated mt6360_pmic pwr_off_seq in {mt6360_dtsi}")
+
+
+def _patch_419_cameraisp_owe(kernel_dir: Path) -> None:
+    """Wire drivers/misc/mediatek/cameraisp/owe (checked out from lineage-24.0) into Kbuild/Kconfig."""
+    owe_dir = kernel_dir / "drivers/misc/mediatek/cameraisp/owe"
+    if not (owe_dir / "mt6785/camera_owe.c").is_file():
+        raise FileNotFoundError(
+            f"Missing {owe_dir / 'mt6785/camera_owe.c'} (ensure lineage-24.0 cameraisp/owe was checked out)"
+        )
+
+    kcfg = kernel_dir / "drivers/misc/mediatek/cameraisp/Kconfig"
+    kcfg_txt = kcfg.read_text(encoding="utf-8")
+    if '#source "drivers/misc/mediatek/cameraisp/owe/Kconfig"' in kcfg_txt:
+        kcfg.write_text(
+            kcfg_txt.replace(
+                '#source "drivers/misc/mediatek/cameraisp/owe/Kconfig"',
+                'source "drivers/misc/mediatek/cameraisp/owe/Kconfig"',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[PATCH] Enabled cameraisp/owe/Kconfig in {kcfg}")
+
+    mk = kernel_dir / "drivers/misc/mediatek/cameraisp/Makefile"
+    mk_txt = mk.read_text(encoding="utf-8")
+    if "obj-$(CONFIG_MTK_CAMERA_ISP_OWE_SUPPORT) += owe/" not in mk_txt:
+        old_owe = "#ifeq ($(CONFIG_MACH_MT6763),y)\n#obj-y += owe/\n#endif"
+        if old_owe not in mk_txt:
+            raise RuntimeError(f"Could not find commented owe block in {mk}")
+        mk.write_text(
+            mk_txt.replace(old_owe, "obj-$(CONFIG_MTK_CAMERA_ISP_OWE_SUPPORT) += owe/", 1),
+            encoding="utf-8",
+        )
+        print(f"[PATCH] Enabled cameraisp/owe build rule in {mk}")
+
+    owe_mk = owe_dir / "Makefile"
+    owe_mk_txt = owe_mk.read_text(encoding="utf-8")
+    if "-I$(srctree)/drivers/iommu" not in owe_mk_txt:
+        owe_mk.write_text(
+            owe_mk_txt.replace(
+                "ccflags-y += -I$(srctree)/drivers/misc/mediatek/smi/",
+                "ccflags-y += -I$(srctree)/drivers/misc/mediatek/smi/\nccflags-y += -I$(srctree)/drivers/iommu",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[PATCH] Added iommu include path to {owe_mk}")
+
+
+def _patch_419_display_charger_wifi_fixes(kernel_dir: Path) -> None:
+    """Apply upstream lineage-24.0 & community stability fixes for display, PD charging, thermal, and Wi-Fi."""
+    # 1. mtkfb.c: Fix console_lock deadlock in mtkfb_blank (e67c7e122) & stale FP unblank state (c6e68b3e6)
+    mtkfb = kernel_dir / "drivers/misc/mediatek/video/mt6785/videox/mtkfb.c"
+    fb_txt = mtkfb.read_text(encoding="utf-8")
+    orig_fb = fb_txt
+    if "cancel_delayed_work_sync(&prim_panel_work);" in fb_txt:
+        fb_txt = fb_txt.replace(
+            "cancel_delayed_work_sync(&prim_panel_work);",
+            "cancel_delayed_work(&prim_panel_work);",
+            1,
+        )
+    pd_old = (
+        "\tcase FB_BLANK_POWERDOWN:\n"
+        "\t\tDISPDBG(\"%s mtkfb_early_suspend\\n\", __func__);\n"
+        "\t\tif (bypass_blank) {"
+    )
+    pd_new = (
+        "\tcase FB_BLANK_POWERDOWN:\n"
+        "\t\tDISPDBG(\"%s mtkfb_early_suspend\\n\", __func__);\n"
+        "\t\tif (info == prim_fbi) {\n"
+        "\t\t\tatomic_set(&prim_panel_is_on, false);\n"
+        "\t\t\tcancel_delayed_work(&prim_panel_work);\n"
+        "\t\t}\n"
+        "\t\tif (bypass_blank) {"
+    )
+    if pd_old in fb_txt and "if (info == prim_fbi)" not in fb_txt[fb_txt.find("case FB_BLANK_POWERDOWN:") :]:
+        fb_txt = fb_txt.replace(pd_old, pd_new, 1)
+    if fb_txt != orig_fb:
+        mtkfb.write_text(fb_txt, encoding="utf-8")
+        print(f"[PATCH] Applied mtkfb_blank deadlock and FP unblank fixes in {mtkfb}")
+
+    # 2. mtk_ts_btspdchg.c: Fix double ADC scaling (70dc56eca) so 33W PD charger NTC reads true millivolts
+    bts = kernel_dir / "drivers/misc/mediatek/thermal/common/thermal_zones/mtk_ts_btspdchg.c"
+    bts_txt = bts.read_text(encoding="utf-8")
+    orig_bts = bts_txt
+    bts_txt = re.sub(
+        r'\tpr_err\("%s\s+%d thermistor_ch5 not NULL \.\.\.\.\.\. \\n", __func__, __LINE__\);\n',
+        "",
+        bts_txt,
+        count=1,
+    )
+    if "\t/*val * 1500 / 4096*/\n\tret = (val * 1500) >> 12;" in bts_txt:
+        bts_txt = bts_txt.replace(
+            "\t/*val * 1500 / 4096*/\n\tret = (val * 1500) >> 12;",
+            "\t/* mt6577_auxadc already returns millivolts for processed reads */\n\tret = val;",
+            1,
+        )
+    if bts_txt != orig_bts:
+        bts.write_text(bts_txt, encoding="utf-8")
+        print(f"[PATCH] Fixed PD charger NTC double ADC scaling in {bts}")
+
+    # 3. mtk_charger.c: Clamp negative system_temp_level OOB index (8436741fa)
+    chg = kernel_dir / "drivers/power/supply/mediatek/charger/mtk_charger.c"
+    chg_txt = chg.read_text(encoding="utf-8")
+    chg_old = (
+        "    power_supply_get_property(pinfo->usb_psy,\n"
+        "\t\t\tPOWER_SUPPLY_PROP_REAL_TYPE, &real_type);\n\n"
+        "\tif (temp_level > pinfo->system_temp_level_max - 1)"
+    )
+    chg_new = (
+        "    power_supply_get_property(pinfo->usb_psy,\n"
+        "\t\t\tPOWER_SUPPLY_PROP_REAL_TYPE, &real_type);\n\n"
+        "\tif (temp_level < 0)\n"
+        "\t\tpinfo->system_temp_level = 0;\n"
+        "\telse if (temp_level > pinfo->system_temp_level_max - 1)"
+    )
+    if chg_old in chg_txt:
+        chg.write_text(chg_txt.replace(chg_old, chg_new, 1), encoding="utf-8")
+        print(f"[PATCH] Clamped negative thermal temp_level in {chg}")
+
+    # 4. mtk_pd_adapter.c: Clear PD_VERIFY_IN_PROCESS on disconnect/hard-reset (8fb47d6a0) so USB ADB recovers
+    pda = kernel_dir / "drivers/power/supply/mediatek/charger/mtk_pd_adapter.c"
+    pda_txt = pda.read_text(encoding="utf-8")
+    if "union power_supply_propval pd_verify = {0,};" not in pda_txt:
+        pda_txt = pda_txt.replace(
+            "\tunion power_supply_propval pd_authentication = {0,};\n",
+            "\tunion power_supply_propval pd_authentication = {0,};\n\tunion power_supply_propval pd_verify = {0,};\n",
+            1,
+        )
+        pda_txt = pda_txt.replace(
+            "\t\t\tpinfo->adapter_dev->verify_process = 0;\n\t\t\tnotify_adapter_event(MTK_PD_ADAPTER,\n\t\t\t\tMTK_PD_CONNECT_NONE, NULL);",
+            "\t\t\tpinfo->adapter_dev->verify_process = 0;\n\t\t\tpower_supply_set_property(usb_psy, POWER_SUPPLY_PROP_PD_VERIFY_IN_PROCESS, &pd_verify);\n\t\t\tnotify_adapter_event(MTK_PD_ADAPTER,\n\t\t\t\tMTK_PD_CONNECT_NONE, NULL);",
+            1,
+        )
+        pda_txt = pda_txt.replace(
+            "\t\t\tret = power_supply_set_property(usb_psy, POWER_SUPPLY_PROP_PD_AUTHENTICATION, &pd_authentication);\n",
+            "\t\t\tret = power_supply_set_property(usb_psy, POWER_SUPPLY_PROP_PD_AUTHENTICATION, &pd_authentication);\n\t\t\tpower_supply_set_property(usb_psy, POWER_SUPPLY_PROP_PD_VERIFY_IN_PROCESS, &pd_verify);\n",
+            1,
+        )
+        pda.write_text(pda_txt, encoding="utf-8")
+        print(f"[PATCH] Cleared PD verify flag on disconnect in {pda}")
+
+    # 5. gen4m axi.c: Guard of_reserved_mem_device_init against pre-assigned dma_mem (56e06b2243)
+    axi = kernel_dir / "drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/hif/axi/axi.c"
+    axi_txt = axi.read_text(encoding="utf-8")
+    axi_old = (
+        "\tret = _init_resv_mem(pdev);\n"
+        "\tif (ret)\n"
+        "\t\tgoto exit;\n"
+        "\tret = of_reserved_mem_device_init(&pdev->dev);\n"
+        "\tif (ret) {\n"
+        "\t\tDBGLOG(INIT, ERROR, \"of_reserved_mem_device_init failed(%d).\\n\",\n"
+        "\t\t\t\tret);\n"
+        "\t\tgoto exit;\n"
+        "\t}"
+    )
+    axi_new = (
+        "\tret = _init_resv_mem(pdev);\n"
+        "\tif (ret)\n"
+        "\t\tgoto exit;\n"
+        "\tif (!pdev->dev.dma_mem) {\n"
+        "\t\tret = of_reserved_mem_device_init(&pdev->dev);\n"
+        "\t\tif (ret) {\n"
+        "\t\t\tDBGLOG(INIT, ERROR, \"of_reserved_mem_device_init failed(%d).\\n\",\n"
+        "\t\t\t\t\tret);\n"
+        "\t\t\tgoto exit;\n"
+        "\t\t}\n"
+        "\t}"
+    )
+    if "if (!pdev->dev.dma_mem)" not in axi_txt:
+        if axi_old not in axi_txt:
+            raise RuntimeError(f"Could not match axiDmaSetup block in {axi}")
+        axi.write_text(axi_txt.replace(axi_old, axi_new, 1), encoding="utf-8")
+        print(f"[PATCH] Guarded DMA coherent pool init in {axi}")
+
 
 def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
     sysc = kernel_dir / "kernel/sys.c"
@@ -115,26 +449,6 @@ def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
         raise RuntimeError(f"Could not locate override_release() in {sysc}")
     sysc.write_text(new_txt, encoding="utf-8")
     print(f"[PATCH] Applied targeted bpfloader uname override in {sysc}")
-
-
-def _patch_419_mt6785_dts_swtp(kernel_dir: Path) -> None:
-    """Uncomment swtp / swtp_1 / ant_check nodes in 4.19 mt6785.dts so stock dtbo_a merges cleanly."""
-    dts = kernel_dir / "arch/arm64/boot/dts/mediatek/mt6785.dts"
-    if not dts.is_file():
-        raise FileNotFoundError(f"Expected mt6785.dts missing: {dts}")
-    text = dts.read_text(encoding="utf-8")
-    pattern = re.compile(
-        r"/\*\s*\n(\s*//add for swtp by longcheer begin[\s\S]*?ant_check_div\s*\{[\s\S]*?\};\s*)\n\s*\*/"
-    )
-    m = pattern.search(text)
-    if m:
-        new_text = text[: m.start()] + m.group(1) + text[m.end() :]
-        dts.write_text(new_text, encoding="utf-8")
-        print(f"[PATCH] Uncommented swtp/swtp_1/ant_check nodes in {dts}")
-    elif "swtp: swtp {" in text and "swtp_1: swtp_1 {" in text:
-        print(f"[PATCH] swtp/swtp_1 nodes already active in {dts}")
-    else:
-        raise RuntimeError(f"Could not find swtp/swtp_1 block in {dts}")
 
 
 def _patch_adsp_excep_bounds(kernel_dir: Path) -> None:
@@ -199,11 +513,13 @@ def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) 
         raise ValueError(f"Unknown track {track!r}; expected one of {VALID_TRACKS}")
     _clean_version_markers(kernel_dir)
     _patch_adsp_excep_bounds(kernel_dir)
-    if track == "4.19-r25p0":
-        _patch_419_mali_r25p0(kernel_dir)
-        _patch_419_mt6785_dts_swtp(kernel_dir)
-    elif track == "4.19-r32p1":
-        _patch_419_mt6785_dts_swtp(kernel_dir)
+    if track in ("4.19-r25p0", "4.19-r32p1"):
+        _patch_419_ufs_bootdevice_rename(kernel_dir)
+        _patch_419_mt6785_dts_rosemary_compat(kernel_dir)
+        _patch_419_cameraisp_owe(kernel_dir)
+        _patch_419_display_charger_wifi_fixes(kernel_dir)
+        if track == "4.19-r25p0":
+            _patch_419_mali_r25p0(kernel_dir)
     elif track == "4.14-r25p0" and enable_414_spoof:
         _patch_414_bpfload_uname_spoof(kernel_dir)
 

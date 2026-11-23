@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify compiled kernel .config, Image.gz banner safety, and mt6785.dtb magic."""
+"""Verify compiled kernel .config, Image.gz binary/banner safety, and mt6785.dtb nodes."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import re
 import struct
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 BANNED_BANNER_SUBSTRINGS = (
     "lineage",
@@ -26,17 +26,20 @@ EXPECTED_TRACK_META = {
     "4.19-r25p0": {
         "kver_prefix": "4.19.",
         "gpu_version": '"mali bifrost r25p0"',
-        "require_xdp": True,
+        "mali_compat": "arm,mali-bifrost",
+        "is_419": True,
     },
     "4.19-r32p1": {
         "kver_prefix": "4.19.",
         "gpu_version": '"mali valhall r32p1"',
-        "require_xdp": True,
+        "mali_compat": "arm,mali-valhall",
+        "is_419": True,
     },
     "4.14-r25p0": {
         "kver_prefix": "4.14.",
         "gpu_version": '"mali bifrost r25p0"',
-        "require_xdp": False,
+        "mali_compat": "arm,mali-bifrost",
+        "is_419": False,
     },
 }
 
@@ -45,6 +48,7 @@ REQUIRED_Y_SYMBOLS = (
     "CONFIG_EROFS_FS_XATTR",
     "CONFIG_EROFS_FS_SECURITY",
     "CONFIG_EROFS_FS_ZIP",
+    "CONFIG_SDCARD_FS",
     "CONFIG_USERFAULTFD",
     "CONFIG_BPF_SYSCALL",
     "CONFIG_CGROUP_BPF",
@@ -57,14 +61,24 @@ REQUIRED_Y_SYMBOLS = (
     "CONFIG_SECURITY_SELINUX",
     "CONFIG_EXT4_FS",
     "CONFIG_FS_VERITY",
+    "CONFIG_MTK_CAMERA_ISP_OWE_SUPPORT",
 )
 
+REQUIRED_419_Y_SYMBOLS = (
+    "CONFIG_XDP_SOCKETS",
+    "CONFIG_MTK_AUDIODSP_LEGACY",
+    "CONFIG_SCHED_TUNE",
+    "CONFIG_UCLAMP_TASK",
+    "CONFIG_UCLAMP_TASK_GROUP",
+    "CONFIG_PROC_UID",
+    "CONFIG_ZRAM_WRITEBACK",
+)
 
 MAX_IMAGE_GZ_BYTES = 15 * 1024 * 1024  # Safely below MT6785 LK 16 MiB (0x01000000) zImage limit
 REQUIRED_DTB_SYMBOLS = ("swtp", "swtp_1")
 
 
-def extract_fdt_symbols(fdt: bytes) -> set[str]:
+def parse_fdt(fdt: bytes) -> Tuple[set[str], Dict[str, Dict[str, bytes]]]:
     if len(fdt) < 40:
         raise ValueError("FDT too small")
     magic, _totalsize, off_struct, off_strings, _off_mem, _ver, _lver, _cpu, sz_str, sz_struct = struct.unpack(
@@ -77,6 +91,7 @@ def extract_fdt_symbols(fdt: bytes) -> set[str]:
     end = off_struct + sz_struct
     stack: List[str] = []
     symbols: set[str] = set()
+    nodes: Dict[str, Dict[str, bytes]] = {}
     while pos < end:
         tok = struct.unpack(">I", fdt[pos : pos + 4])[0]
         pos += 4
@@ -85,19 +100,23 @@ def extract_fdt_symbols(fdt: bytes) -> set[str]:
             name = fdt[pos:nul].decode("ascii", "replace")
             pos = (nul + 4) & ~3
             stack.append(name)
+            path = "/" + "/".join(s for s in stack if s)
+            nodes.setdefault(path, {})
         elif tok == 2:  # FDT_END_NODE
             stack.pop()
         elif tok == 3:  # FDT_PROP
             plen, nameoff = struct.unpack(">2I", fdt[pos : pos + 8])
             pos += 8
+            val = fdt[pos : pos + plen]
             pos = (pos + plen + 3) & ~3
             path = "/" + "/".join(s for s in stack if s)
+            pname = strtab[nameoff : strtab.find(b"\x00", nameoff)].decode("ascii", "replace")
+            nodes.setdefault(path, {})[pname] = val
             if path == "/__symbols__":
-                pname = strtab[nameoff : strtab.find(b"\x00", nameoff)].decode("ascii", "replace")
                 symbols.add(pname)
         elif tok == 9:  # FDT_END
             break
-    return symbols
+    return symbols, nodes
 
 
 def parse_kconfig(config_path: Path) -> Dict[str, str]:
@@ -135,8 +154,12 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
         if cfg.get(sym) != "y":
             errors.append(f"{sym}={cfg.get(sym)!r} (expected 'y')")
 
-    if meta["require_xdp"] and cfg.get("CONFIG_XDP_SOCKETS") != "y":
-        errors.append(f"CONFIG_XDP_SOCKETS={cfg.get('CONFIG_XDP_SOCKETS')!r} (expected 'y')")
+    if meta["is_419"]:
+        for sym in REQUIRED_419_Y_SYMBOLS:
+            if cfg.get(sym) != "y":
+                errors.append(f"{sym}={cfg.get(sym)!r} (expected 'y')")
+        if cfg.get("CONFIG_PANIC_ON_OOPS", "n") != "n":
+            errors.append(f"CONFIG_PANIC_ON_OOPS={cfg.get('CONFIG_PANIC_ON_OOPS')!r} (expected 'n')")
 
     if cfg.get("CONFIG_LOCALVERSION") != '"-perf"':
         errors.append(f"CONFIG_LOCALVERSION={cfg.get('CONFIG_LOCALVERSION')!r} (expected '\"-perf\"')")
@@ -147,7 +170,7 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
             f"CONFIG_MTK_GPU_VERSION={cfg.get('CONFIG_MTK_GPU_VERSION')!r} (expected {meta['gpu_version']!r})"
         )
 
-    # Check Image.gz size (must stay below MT6785 LK 16 MiB zImage limit) and banner
+    # Check Image.gz size, banner, and compiled binary markers
     img_gz_bytes = img_gz_path.read_bytes()
     if len(img_gz_bytes) > MAX_IMAGE_GZ_BYTES:
         errors.append(
@@ -155,6 +178,9 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
             "(ensure CONFIG_IKHEADERS / CONFIG_KALLSYMS_ALL are disabled)"
         )
     raw_image = gzip.decompress(img_gz_bytes)
+    if meta["is_419"] and b"ufs_mtk: renamed to bootdevice" not in raw_image:
+        errors.append("Compiled 4.19 Image missing 'ufs_mtk: renamed to bootdevice' patch in ufs-mediatek.c")
+
     m = re.search(rb"Linux version ([^\x00\r\n]+)", raw_image)
     if not m:
         errors.append("Could not locate 'Linux version ...' banner inside decompressed Image.gz")
@@ -170,22 +196,31 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
                 errors.append(f"Banned anti-tamper substring '{bad}' in banner: {banner}")
         print(f"[INFO] Kernel banner: {banner}")
 
-    # Check mt6785.dtb magic and stock dtbo_a overlay symbol compatibility (swtp, swtp_1)
+    # Check mt6785.dtb magic, stock dtbo_a overlay symbol compatibility, and mali@13040000 compatible
     dtb_bytes = dtb_path.read_bytes()
     if len(dtb_bytes) < 40 or struct.unpack(">I", dtb_bytes[:4])[0] != 0xD00DFEED:
         errors.append(f"Invalid FDT magic in {dtb_path}: {dtb_bytes[:4].hex()}")
     else:
-        syms = extract_fdt_symbols(dtb_bytes)
+        syms, nodes = parse_fdt(dtb_bytes)
         missing_syms = [s for s in REQUIRED_DTB_SYMBOLS if s not in syms]
         if missing_syms:
             errors.append(f"mt6785.dtb missing stock dtbo_a overlay __symbols__: {missing_syms}")
+
+        mali_node = nodes.get("/mali@13040000", {})
+        mali_compat_raw = mali_node.get("compatible", b"")
+        mali_compats = [c.decode("ascii", "replace") for c in mali_compat_raw.split(b"\x00") if c]
+        expected_mali = str(meta["mali_compat"])
+        if expected_mali not in mali_compats:
+            errors.append(
+                f"mt6785.dtb /mali@13040000 compatible={mali_compats} missing expected {expected_mali!r}"
+            )
 
     if errors:
         raise AssertionError("Kernel artifact verification failed:\n  - " + "\n  - ".join(errors))
 
     print(
         f"[PASS] Verified {track}: Image.gz ({img_gz_path.stat().st_size:,} B), "
-        f"mt6785.dtb ({dtb_path.stat().st_size:,} B), all required Kconfig flags OK."
+        f"mt6785.dtb ({dtb_path.stat().st_size:,} B), all Kconfig, UFS bootdevice, and Mali DT gates OK."
     )
 
 

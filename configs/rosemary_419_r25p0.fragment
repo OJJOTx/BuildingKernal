@@ -1,6 +1,6 @@
 # Track 1A: LineageOS 23.2 (Linux 4.19.325) + Mali Bifrost r25p0 (r26p0-01eac0)
-# Matches untouched stock V14.0.11.0.TKLMIXM vendor_a GPU ABI while providing
-# true 4.19.325 for Android 15 NetBpfLoad, native EROFS, and userfaultfd.
+# Matches untouched stock V14.0.11.0.TKLMIXM vendor_a GPU/ADSP/storage ABIs while
+# providing true 4.19.325 for HyperOS 1 & Android 15 HyperOS 3 (NetBpfLoad, EROFS, UFFD).
 
 CONFIG_LOCALVERSION="-perf"
 # CONFIG_LOCALVERSION_AUTO is not set
@@ -10,10 +10,24 @@ CONFIG_LOCALVERSION="-perf"
 # CONFIG_IKHEADERS is not set
 # CONFIG_KALLSYMS_ALL is not set
 # CONFIG_DEBUG_INFO is not set
-# Match lineage-22.2 rosemary_defconfig so non-fatal worker oopses don't hard-reboot
+# Match stock 4.14.186 & lineage-22.2 rosemary_defconfig so non-fatal worker oopses don't hard-reboot
 # CONFIG_PANIC_ON_OOPS is not set
 
 CONFIG_MTK_GPU_VERSION="mali bifrost r25p0"
+
+# Stock V14.0.11.0.TKLMIXM firmware & vendor_a compatibility
+# 1. Legacy 240-byte ADSP IPI mailbox ABI matching stock audio_dsp_a & audio.primary.mt6785.so
+CONFIG_MTK_AUDIODSP_LEGACY=y
+# 2. sdcardfs required by stock vendor_a / vold for /data/media (/mnt/runtime/*/emulated)
+CONFIG_SDCARD_FS=y
+# 3. Camera ISP OWE (/dev/camera-owe) backported from lineage-24.0 for stock camerahalserver
+CONFIG_MTK_CAMERA_ISP_OWE_SUPPORT=y
+# 4. Per-UID CPU accounting (/proc/uid_*) & zRAM writeback + HID multitouch matching stock 4.14
+CONFIG_PROC_UID=y
+CONFIG_ZRAM_WRITEBACK=y
+CONFIG_HID_MULTITOUCH=y
+# 5. Prevent 1.3s R12_CONN2AP_SPM_WAKEUP_B Wi-Fi firmware log wakeups during deep sleep
+# CONFIG_MTK_CONNSYS_DEDICATED_LOG_PATH is not set
 
 # EROFS (LZ4_0PADDING / COMPACTED_2B / BIG_PCLUSTER) for HyperOS 3 gold images
 CONFIG_EROFS_FS=y
