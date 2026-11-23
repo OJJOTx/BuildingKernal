@@ -1,0 +1,197 @@
+name: Build Rosemary HyperOS Kernel
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - "configs/**"
+      - "patches/**"
+      - "scripts/**"
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "Kernel + Mali GPU track"
+        required: true
+        default: "4.19-r25p0"
+        type: choice
+        options:
+          - 4.19-r25p0
+          - 4.19-r32p1
+          - 4.14-r25p0
+      clang_version:
+        description: "AOSP Clang prebuilt version"
+        required: true
+        default: "r487747c"
+        type: choice
+        options:
+          - r487747c
+          - r522817
+      enable_414_bpfload_uname_spoof:
+        description: "4.14-r25p0 only: return 4.19.325-perf uname to netbpfload/bpfloader comms"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TRACK: ${{ inputs.track || '4.19-r25p0' }}
+  CLANG_VERSION: ${{ inputs.clang_version || 'r487747c' }}
+  ENABLE_414_SPOOF: ${{ inputs.enable_414_bpfload_uname_spoof || 'false' }}
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache cpio flex git \
+            libelf-dev libssl-dev python3 device-tree-compiler xz-utils curl
+
+      - name: Cache AOSP Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/clang
+          key: aosp-clang-${{ env.CLANG_VERSION }}-v1
+
+      - name: Download AOSP Clang toolchain
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${{ runner.temp }}/clang"
+          if [ "${{ env.CLANG_VERSION }}" = "r522817" ]; then
+            CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android15-release/clang-r522817.tar.gz"
+          else
+            CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz"
+          fi
+          curl -fL "$CLANG_URL" -o "${{ runner.temp }}/clang.tar.gz"
+          tar -xzf "${{ runner.temp }}/clang.tar.gz" -C "${{ runner.temp }}/clang"
+          rm -f "${{ runner.temp }}/clang.tar.gz"
+
+      - name: Select kernel branch and config fragment
+        id: track-vars
+        run: |
+          case "${{ env.TRACK }}" in
+            4.19-r25p0)
+              echo "branch=lineage-23.2" >> "$GITHUB_OUTPUT"
+              echo "fragment=configs/rosemary_419_r25p0.fragment" >> "$GITHUB_OUTPUT"
+              ;;
+            4.19-r32p1)
+              echo "branch=lineage-23.2" >> "$GITHUB_OUTPUT"
+              echo "fragment=configs/rosemary_419_r32p1.fragment" >> "$GITHUB_OUTPUT"
+              ;;
+            4.14-r25p0)
+              echo "branch=lineage-22.2" >> "$GITHUB_OUTPUT"
+              echo "fragment=configs/rosemary_414_r25p0.fragment" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown track: ${{ env.TRACK }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Shallow clone LineageOS/android_kernel_xiaomi_mt6785
+        run: |
+          git clone --depth=1 --branch "${{ steps.track-vars.outputs.branch }}" \
+            https://github.com/LineageOS/android_kernel_xiaomi_mt6785.git kernel-src
+
+      - name: Apply track patches
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ env.ENABLE_414_SPOOF }}" = "true" ]; then
+            EXTRA_ARGS="--enable-414-bpfload-uname-spoof"
+          fi
+          python3 patches/apply_kernel_patches.py \
+            --kernel-dir kernel-src \
+            --track "${{ env.TRACK }}" \
+            $EXTRA_ARGS
+
+      - name: Configure and compile Image.gz and dtbs
+        id: compile
+        run: |
+          export PATH="${{ runner.temp }}/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER=builder
+          export KBUILD_BUILD_HOST=pangu-build-component-vendor
+
+          MAKE_ARGS=(
+            -C kernel-src
+            O="$PWD/out"
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CC="ccache clang"
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          )
+
+          mkdir -p out
+          make "${MAKE_ARGS[@]}" rosemary_defconfig
+          KCONFIG_CONFIG="$PWD/out/.config" kernel-src/scripts/kconfig/merge_config.sh \
+            -m -O "$PWD/out" "$PWD/out/.config" "$PWD/${{ steps.track-vars.outputs.fragment }}"
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          set -o pipefail
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image.gz dtbs 2>&1 | tee "$PWD/build.log"
+
+      - name: Verify kernel config, Image.gz banner, and mt6785.dtb
+        run: |
+          python3 scripts/verify_kernel_artifact.py \
+            --out-dir "$PWD/out" \
+            --track "${{ env.TRACK }}"
+
+      - name: Stage output artifacts and checksums
+        run: |
+          mkdir -p dist
+          cp out/arch/arm64/boot/Image.gz dist/Image.gz
+          cp out/arch/arm64/boot/dts/mediatek/mt6785.dtb dist/mt6785.dtb
+          if [ -f out/arch/arm64/boot/dts/mediatek/rosemary.dtbo ]; then
+            cp out/arch/arm64/boot/dts/mediatek/rosemary.dtbo dist/rosemary.dtbo
+          fi
+          cp out/.config dist/config.txt
+
+          KERNEL_RELEASE=$(make -s -C kernel-src O="$PWD/out" ARCH=arm64 kernelrelease || true)
+          {
+            echo "track=${{ env.TRACK }}"
+            echo "branch=${{ steps.track-vars.outputs.branch }}"
+            echo "clang=${{ env.CLANG_VERSION }}"
+            echo "kernel_release=${KERNEL_RELEASE}"
+            echo "upstream_commit=$(git -C kernel-src rev-parse HEAD)"
+            echo "build_time_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > dist/BUILD_INFO.txt
+
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          cat dist/BUILD_INFO.txt
+          cat dist/SHA256SUMS.txt
+
+      - name: Upload compiled kernel artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rosemary-kernel-${{ env.TRACK }}
+          path: dist/
+          retention-days: 30
+
+      - name: Upload failure diagnostic build log
+        if: failure() && hashFiles('build.log') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: rosemary-kernel-${{ env.TRACK }}-failed-log
+          path: |
+            build.log
+            out/.config
+          retention-days: 7

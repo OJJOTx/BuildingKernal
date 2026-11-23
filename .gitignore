@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*$py.class
+kernel-src/
+out/
+dist/
+*.log
+*.img
+*.tar.gz
