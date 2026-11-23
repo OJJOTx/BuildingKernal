@@ -60,6 +60,46 @@ REQUIRED_Y_SYMBOLS = (
 )
 
 
+MAX_IMAGE_GZ_BYTES = 15 * 1024 * 1024  # Safely below MT6785 LK 16 MiB (0x01000000) zImage limit
+REQUIRED_DTB_SYMBOLS = ("swtp", "swtp_1")
+
+
+def extract_fdt_symbols(fdt: bytes) -> set[str]:
+    if len(fdt) < 40:
+        raise ValueError("FDT too small")
+    magic, _totalsize, off_struct, off_strings, _off_mem, _ver, _lver, _cpu, sz_str, sz_struct = struct.unpack(
+        ">10I", fdt[:40]
+    )
+    if magic != 0xD00DFEED:
+        raise ValueError(f"Invalid FDT magic: 0x{magic:08x}")
+    strtab = fdt[off_strings : off_strings + sz_str]
+    pos = off_struct
+    end = off_struct + sz_struct
+    stack: List[str] = []
+    symbols: set[str] = set()
+    while pos < end:
+        tok = struct.unpack(">I", fdt[pos : pos + 4])[0]
+        pos += 4
+        if tok == 1:  # FDT_BEGIN_NODE
+            nul = fdt.find(b"\x00", pos)
+            name = fdt[pos:nul].decode("ascii", "replace")
+            pos = (nul + 4) & ~3
+            stack.append(name)
+        elif tok == 2:  # FDT_END_NODE
+            stack.pop()
+        elif tok == 3:  # FDT_PROP
+            plen, nameoff = struct.unpack(">2I", fdt[pos : pos + 8])
+            pos += 8
+            pos = (pos + plen + 3) & ~3
+            path = "/" + "/".join(s for s in stack if s)
+            if path == "/__symbols__":
+                pname = strtab[nameoff : strtab.find(b"\x00", nameoff)].decode("ascii", "replace")
+                symbols.add(pname)
+        elif tok == 9:  # FDT_END
+            break
+    return symbols
+
+
 def parse_kconfig(config_path: Path) -> Dict[str, str]:
     vals: Dict[str, str] = {}
     for raw in config_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -107,8 +147,14 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
             f"CONFIG_MTK_GPU_VERSION={cfg.get('CONFIG_MTK_GPU_VERSION')!r} (expected {meta['gpu_version']!r})"
         )
 
-    # Check Image.gz banner
-    raw_image = gzip.decompress(img_gz_path.read_bytes())
+    # Check Image.gz size (must stay below MT6785 LK 16 MiB zImage limit) and banner
+    img_gz_bytes = img_gz_path.read_bytes()
+    if len(img_gz_bytes) > MAX_IMAGE_GZ_BYTES:
+        errors.append(
+            f"Image.gz size {len(img_gz_bytes):,} B exceeds {MAX_IMAGE_GZ_BYTES:,} B LK zImage safety cap "
+            "(ensure CONFIG_IKHEADERS / CONFIG_KALLSYMS_ALL are disabled)"
+        )
+    raw_image = gzip.decompress(img_gz_bytes)
     m = re.search(rb"Linux version ([^\x00\r\n]+)", raw_image)
     if not m:
         errors.append("Could not locate 'Linux version ...' banner inside decompressed Image.gz")
@@ -124,10 +170,15 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
                 errors.append(f"Banned anti-tamper substring '{bad}' in banner: {banner}")
         print(f"[INFO] Kernel banner: {banner}")
 
-    # Check mt6785.dtb magic
-    dtb_head = dtb_path.read_bytes()[:4]
-    if len(dtb_head) < 4 or struct.unpack(">I", dtb_head)[0] != 0xD00DFEED:
-        errors.append(f"Invalid FDT magic in {dtb_path}: {dtb_head.hex()}")
+    # Check mt6785.dtb magic and stock dtbo_a overlay symbol compatibility (swtp, swtp_1)
+    dtb_bytes = dtb_path.read_bytes()
+    if len(dtb_bytes) < 40 or struct.unpack(">I", dtb_bytes[:4])[0] != 0xD00DFEED:
+        errors.append(f"Invalid FDT magic in {dtb_path}: {dtb_bytes[:4].hex()}")
+    else:
+        syms = extract_fdt_symbols(dtb_bytes)
+        missing_syms = [s for s in REQUIRED_DTB_SYMBOLS if s not in syms]
+        if missing_syms:
+            errors.append(f"mt6785.dtb missing stock dtbo_a overlay __symbols__: {missing_syms}")
 
     if errors:
         raise AssertionError("Kernel artifact verification failed:\n  - " + "\n  - ".join(errors))

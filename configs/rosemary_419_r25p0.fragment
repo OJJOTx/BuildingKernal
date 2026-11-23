@@ -5,6 +5,12 @@
 CONFIG_LOCALVERSION="-perf"
 # CONFIG_LOCALVERSION_AUTO is not set
 
+# Keep Image.gz well below MediaTek LK's 16 MiB (0x01000000) zImage limit
+# (CONFIG_IKHEADERS alone embeds ~3.42 MiB of incompressible tar.xz headers)
+# CONFIG_IKHEADERS is not set
+# CONFIG_KALLSYMS_ALL is not set
+# CONFIG_DEBUG_INFO is not set
+
 CONFIG_MTK_GPU_VERSION="mali bifrost r25p0"
 
 # EROFS (LZ4_0PADDING / COMPACTED_2B / BIG_PCLUSTER) for HyperOS 3 gold images

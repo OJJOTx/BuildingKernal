@@ -117,12 +117,35 @@ def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
     print(f"[PATCH] Applied targeted bpfloader uname override in {sysc}")
 
 
+def _patch_419_mt6785_dts_swtp(kernel_dir: Path) -> None:
+    """Uncomment swtp / swtp_1 / ant_check nodes in 4.19 mt6785.dts so stock dtbo_a merges cleanly."""
+    dts = kernel_dir / "arch/arm64/boot/dts/mediatek/mt6785.dts"
+    if not dts.is_file():
+        raise FileNotFoundError(f"Expected mt6785.dts missing: {dts}")
+    text = dts.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"/\*\s*\n(\s*//add for swtp by longcheer begin[\s\S]*?ant_check_div\s*\{[\s\S]*?\};\s*)\n\s*\*/"
+    )
+    m = pattern.search(text)
+    if m:
+        new_text = text[: m.start()] + m.group(1) + text[m.end() :]
+        dts.write_text(new_text, encoding="utf-8")
+        print(f"[PATCH] Uncommented swtp/swtp_1/ant_check nodes in {dts}")
+    elif "swtp: swtp {" in text and "swtp_1: swtp_1 {" in text:
+        print(f"[PATCH] swtp/swtp_1 nodes already active in {dts}")
+    else:
+        raise RuntimeError(f"Could not find swtp/swtp_1 block in {dts}")
+
+
 def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) -> None:
     if track not in VALID_TRACKS:
         raise ValueError(f"Unknown track {track!r}; expected one of {VALID_TRACKS}")
     _clean_version_markers(kernel_dir)
     if track == "4.19-r25p0":
         _patch_419_mali_r25p0(kernel_dir)
+        _patch_419_mt6785_dts_swtp(kernel_dir)
+    elif track == "4.19-r32p1":
+        _patch_419_mt6785_dts_swtp(kernel_dir)
     elif track == "4.14-r25p0" and enable_414_spoof:
         _patch_414_bpfload_uname_spoof(kernel_dir)
 
