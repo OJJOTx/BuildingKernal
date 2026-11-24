@@ -207,11 +207,12 @@ def _patch_419_mt6785_dts_rosemary_compat(kernel_dir: Path) -> None:
         "\t\tenable_pe_plus;\n"
         "\t\tenable_pe_2;\n"
         "\t\t/* enable_pe_3; */\n"
-        "\t\tenable_pe_4;\n"
-        "\t\tpd_vbus_upper_bound = <12000000>;"
+        "\t\tenable_pe_4;"
     )
     if chg_old in text:
         text = text.replace(chg_old, chg_new, 1)
+    if "\t\tpd_vbus_upper_bound = <9000000>;" in text:
+        text = text.replace("\t\tpd_vbus_upper_bound = <9000000>;", "\t\tpd_vbus_upper_bound = <12000000>;", 1)
 
     # 3. Add 4.19 rosemary.dts keypad GPIO80 pinctrl default to mt6785.dts
     haptic_end = "}; /* HAPTIC GPIO Settings -End */"
