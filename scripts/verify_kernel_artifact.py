@@ -160,6 +160,11 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
                 errors.append(f"{sym}={cfg.get(sym)!r} (expected 'y')")
         if cfg.get("CONFIG_PANIC_ON_OOPS", "n") != "n":
             errors.append(f"CONFIG_PANIC_ON_OOPS={cfg.get('CONFIG_PANIC_ON_OOPS')!r} (expected 'n')")
+        if track == "4.19-r25p0" and cfg.get("CONFIG_MICROTRUST_DYNAMIC_CORE", "n") != "n":
+            errors.append(
+                f"CONFIG_MICROTRUST_DYNAMIC_CORE={cfg.get('CONFIG_MICROTRUST_DYNAMIC_CORE')!r} "
+                "(expected 'n' for stock TKLMIXM tee1 Soter_20220831 compatibility)"
+            )
 
     if cfg.get("CONFIG_LOCALVERSION") != '"-perf"':
         errors.append(f"CONFIG_LOCALVERSION={cfg.get('CONFIG_LOCALVERSION')!r} (expected '\"-perf\"')")
@@ -214,6 +219,16 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
             errors.append(
                 f"mt6785.dtb /mali@13040000 compatible={mali_compats} missing expected {expected_mali!r}"
             )
+
+        if meta["is_419"]:
+            ssmr_node = nodes.get("/reserved-memory/ssmr-reserved-cma_memory", {})
+            ssmr_sz_raw = ssmr_node.get("size", b"")
+            if len(ssmr_sz_raw) == 8:
+                ssmr_sz = struct.unpack(">Q", ssmr_sz_raw)[0]
+                if ssmr_sz < 0x14000000:
+                    errors.append(
+                        f"mt6785.dtb ssmr-reserved-cma_memory size=0x{ssmr_sz:x} < 0x14000000 (320 MiB SVP+WFD)"
+                    )
 
     if errors:
         raise AssertionError("Kernel artifact verification failed:\n  - " + "\n  - ".join(errors))

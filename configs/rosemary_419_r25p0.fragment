@@ -28,6 +28,8 @@ CONFIG_ZRAM_WRITEBACK=y
 CONFIG_HID_MULTITOUCH=y
 # 5. Prevent 1.3s R12_CONN2AP_SPM_WAKEUP_B Wi-Fi firmware log wakeups during deep sleep
 # CONFIG_MTK_CONNSYS_DEDICATED_LOG_PATH is not set
+# 6. Pin TEEI switch thread to CPU 6 (non-dynamic) to match untouched stock TKLMIXM tee1 (Soter_20220831)
+# CONFIG_MICROTRUST_DYNAMIC_CORE is not set
 
 # EROFS (LZ4_0PADDING / COMPACTED_2B / BIG_PCLUSTER) for HyperOS 3 gold images
 CONFIG_EROFS_FS=y

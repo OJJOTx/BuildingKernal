@@ -237,11 +237,27 @@ def _patch_419_mt6785_dts_rosemary_compat(kernel_dir: Path) -> None:
             raise RuntimeError(f"Could not find HAPTIC GPIO anchor in {dts}")
         text = text.replace(haptic_end, haptic_end + kpd_snippet, 1)
 
+    # 4. Size reusable ssmr_cma_mem to 0x14000000 (320 MiB = 256 MiB SVP + 64 MiB WFD) matching stock 4.14 svp_scheme
+    ssmr_old = (
+        "\t\tssmr_cma_mem: ssmr-reserved-cma_memory {\n"
+        "\t\t\tcompatible = \"shared-dma-pool\";\n"
+        "\t\t\treusable;\n"
+        "\t\t\tsize = <0 0x10000000>;"
+    )
+    ssmr_new = (
+        "\t\tssmr_cma_mem: ssmr-reserved-cma_memory {\n"
+        "\t\t\tcompatible = \"shared-dma-pool\";\n"
+        "\t\t\treusable;\n"
+        "\t\t\tsize = <0 0x14000000>;"
+    )
+    if ssmr_old in text:
+        text = text.replace(ssmr_old, ssmr_new, 1)
+
     if text != orig:
         dts.write_text(text, encoding="utf-8")
-        print(f"[PATCH] Updated rosemary charger & keypad DT properties in {dts}")
+        print(f"[PATCH] Updated rosemary charger, keypad & SSMR CMA DT properties in {dts}")
 
-    # 4. Match 4.19 rosemary.dts mt6360_pmic pwr_off_seq
+    # 5. Match 4.19 rosemary.dts mt6360_pmic pwr_off_seq
     mt6360_dtsi = kernel_dir / "arch/arm64/boot/dts/mediatek/v1/mt6360.dtsi"
     if mt6360_dtsi.is_file():
         m_txt = mt6360_dtsi.read_text(encoding="utf-8")
@@ -425,6 +441,112 @@ def _patch_419_display_charger_wifi_fixes(kernel_dir: Path) -> None:
             raise RuntimeError(f"Could not match axiDmaSetup block in {axi}")
         axi.write_text(axi_txt.replace(axi_old, axi_new, 1), encoding="utf-8")
         print(f"[PATCH] Guarded DMA coherent pool init in {axi}")
+
+    # 6. TEEI 400 lineage-24.0 / 22.2 parity: drop DEBUG_DO/-Werror & restore CONFIG_MICROTRUST_TZ_LOG guards
+    tzd_mk = kernel_dir / "drivers/tee/teei/400/tz_driver/Makefile"
+    if tzd_mk.is_file():
+        tzd_txt = tzd_mk.read_text(encoding="utf-8")
+        if "ccflags-y += -D DEBUG_DO\n" in tzd_txt:
+            tzd_mk.write_text(tzd_txt.replace("ccflags-y += -D DEBUG_DO\n", "", 1), encoding="utf-8")
+            print(f"[PATCH] Dropped -D DEBUG_DO in {tzd_mk}")
+
+    dcih_mk = kernel_dir / "drivers/tee/teei/400/tz_dcih/Makefile"
+    if dcih_mk.is_file():
+        dcih_txt = dcih_mk.read_text(encoding="utf-8")
+        if "ccflags-y += -D DEBUG_DO -fno-pic -Werror" in dcih_txt:
+            dcih_mk.write_text(
+                dcih_txt.replace(
+                    "ccflags-y += -D DEBUG_DO -fno-pic -Werror",
+                    "ccflags-y += -D DEBUG_DO -fno-pic",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            print(f"[PATCH] Dropped -Werror in {dcih_mk}")
+
+    sq_c = kernel_dir / "drivers/tee/teei/400/tz_driver/switch_queue.c"
+    if sq_c.is_file():
+        sq_txt = sq_c.read_text(encoding="utf-8")
+        sq_old = "\t\tif (retVal == 1)\n\t\t\tcontinue;\n\n\t\tteei_notify_log_fn();\n"
+        sq_new = (
+            "\t\tif (retVal == 1)\n\t\t\tcontinue;\n\n"
+            "#ifdef CONFIG_MICROTRUST_TZ_LOG\n\t\tteei_notify_log_fn();\n#endif\n"
+        )
+        if "#ifdef CONFIG_MICROTRUST_TZ_LOG" not in sq_txt and sq_old in sq_txt:
+            sq_c.write_text(sq_txt.replace(sq_old, sq_new, 1), encoding="utf-8")
+            print(f"[PATCH] Restored CONFIG_MICROTRUST_TZ_LOG guard in {sq_c}")
+
+    tcm_c = kernel_dir / "drivers/tee/teei/400/tz_driver/teei_client_main.c"
+    if tcm_c.is_file():
+        tcm_txt = tcm_c.read_text(encoding="utf-8")
+        tcm_old = (
+            "\twake_up_process(teei_bdrv_task);\n\n"
+            "\tinit_tlog_comp_fn();\n\n"
+            "\t/* create the teei log thread */\n"
+            "\tteei_log_task = kthread_create(teei_log_fn, NULL, \"teei_log_thread\");\n"
+            "\tif (IS_ERR(teei_log_task)) {\n"
+            "\t\tIMSG_ERROR(\"create teei log thread failed: %ld\\n\",\n"
+            "\t\t\t\t\t\tPTR_ERR(teei_log_task));\n"
+            "\t\tteei_log_task = NULL;\n"
+            "\t\tgoto class_device_destroy;\n"
+            "\t}\n\n"
+            "\twake_up_process(teei_log_task);\n"
+        )
+        tcm_new = (
+            "\twake_up_process(teei_bdrv_task);\n\n"
+            "#ifdef CONFIG_MICROTRUST_TZ_LOG\n"
+            "\tinit_tlog_comp_fn();\n\n"
+            "\t/* create the teei log thread */\n"
+            "\tteei_log_task = kthread_create(teei_log_fn, NULL, \"teei_log_thread\");\n"
+            "\tif (IS_ERR(teei_log_task)) {\n"
+            "\t\tIMSG_ERROR(\"create teei log thread failed: %ld\\n\",\n"
+            "\t\t\t\t\t\tPTR_ERR(teei_log_task));\n"
+            "\t\tteei_log_task = NULL;\n"
+            "\t\tgoto class_device_destroy;\n"
+            "\t}\n\n"
+            "\twake_up_process(teei_log_task);\n"
+            "#endif\n"
+        )
+        if "#ifdef CONFIG_MICROTRUST_TZ_LOG\n\tinit_tlog_comp_fn();" not in tcm_txt and tcm_old in tcm_txt:
+            tcm_c.write_text(tcm_txt.replace(tcm_old, tcm_new, 1), encoding="utf-8")
+            print(f"[PATCH] Restored CONFIG_MICROTRUST_TZ_LOG guard in {tcm_c}")
+
+    # 7. mtk_gpufreq_core.c: Prevent ERR_PTR dereference in __mt_gpufreq_init_efuse on nvmem error
+    gpufreq_c = kernel_dir / "drivers/gpu/mediatek/gpufreq/mt6785/mtk_gpufreq_core.c"
+    gpu_txt = gpufreq_c.read_text(encoding="utf-8")
+    gpu_old = (
+        '    efuse_cell = nvmem_cell_get(&pdev->dev, "efuse_segment_cell");\n'
+        '    if (IS_ERR(efuse_cell)) {\n'
+        '      PTR_ERR(efuse_cell);\n'
+        '    }\n\n'
+        '    efuse_buf = (unsigned int *)nvmem_cell_read(efuse_cell, &efuse_len);\n'
+        '    nvmem_cell_put(efuse_cell);\n'
+        '    if (IS_ERR(efuse_buf)) {\n'
+        '      PTR_ERR(efuse_buf);\n'
+        '    }\n\n'
+        '    g_efuse_id = (*efuse_buf & 0xFF);\n'
+        '    kfree(efuse_buf);'
+    )
+    gpu_new = (
+        '    efuse_cell = nvmem_cell_get(&pdev->dev, "efuse_segment_cell");\n'
+        '    if (IS_ERR(efuse_cell)) {\n'
+        '        g_efuse_id = 0x0;\n'
+        '    } else {\n'
+        '        efuse_buf = (unsigned int *)nvmem_cell_read(efuse_cell, &efuse_len);\n'
+        '        nvmem_cell_put(efuse_cell);\n'
+        '        if (IS_ERR_OR_NULL(efuse_buf)) {\n'
+        '            g_efuse_id = 0x0;\n'
+        '        } else {\n'
+        '            g_efuse_id = (*efuse_buf & 0xFF);\n'
+        '            kfree(efuse_buf);\n'
+        '        }\n'
+        '    }'
+    )
+    if "IS_ERR_OR_NULL(efuse_buf)" not in gpu_txt:
+        if gpu_old not in gpu_txt:
+            raise RuntimeError(f"Could not match __mt_gpufreq_init_efuse block in {gpufreq_c}")
+        gpufreq_c.write_text(gpu_txt.replace(gpu_old, gpu_new, 1), encoding="utf-8")
+        print(f"[PATCH] Guarded ERR_PTR dereference in {gpufreq_c}")
 
 
 def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
