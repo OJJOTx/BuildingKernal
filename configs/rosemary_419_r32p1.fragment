@@ -1,10 +1,11 @@
-# Track 2: LineageOS 23.2 (Linux 4.19.325) + Mali Valhall r32p1
-# Alternative 4.19 build if vendor_a Mali EGL/Vulkan blobs are upgraded to r32p1.
+# Track 2 (Primary for TFFMIXM 4.19 BSP + HyperOS 3 Android 15):
+# LineageOS 23.2 (Linux 4.19.325) + Mali Valhall r32p1 matching Xiaomi V14.0.17.0.TFFMIXM
+# firmware (ATF/GZ/SCP/SSPM/ADSP/VPU/LK/DTBO) and vendor_a (r32p1-00bet0).
 
 CONFIG_LOCALVERSION="-perf"
 # CONFIG_LOCALVERSION_AUTO is not set
 
-# Keep Image.gz well below MediaTek LK's 16 MiB (0x01000000) zImage limit
+# Keep Image.gz compact & clean
 # CONFIG_IKHEADERS is not set
 # CONFIG_KALLSYMS_ALL is not set
 # CONFIG_DEBUG_INFO is not set
@@ -12,8 +13,9 @@ CONFIG_LOCALVERSION="-perf"
 
 CONFIG_MTK_GPU_VERSION="mali valhall r32p1"
 
-# Stock V14.0.11.0.TKLMIXM firmware & vendor_a compatibility
-CONFIG_MTK_AUDIODSP_LEGACY=y
+# Official Xiaomi V14.0.17.0.TFFMIXM (4.19 BSP) firmware & vendor_a compatibility
+# CONFIG_MTK_AUDIODSP_LEGACY is not set
+CONFIG_MICROTRUST_DYNAMIC_CORE=y
 CONFIG_SDCARD_FS=y
 CONFIG_MTK_CAMERA_ISP_OWE_SUPPORT=y
 CONFIG_PROC_UID=y
@@ -47,6 +49,8 @@ CONFIG_BPF_JIT=y
 CONFIG_BPF_JIT_ALWAYS_ON=y
 CONFIG_NETFILTER_XT_MATCH_BPF=y
 CONFIG_NET_CLS_BPF=y
+CONFIG_NET_ACT_BPF=y
+CONFIG_BPF_EVENTS=y
 CONFIG_XDP_SOCKETS=y
 CONFIG_SECURITY_SELINUX=y
 CONFIG_IKCONFIG=y

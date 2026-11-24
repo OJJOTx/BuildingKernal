@@ -14,11 +14,11 @@ on:
       track:
         description: "Kernel + Mali GPU track"
         required: true
-        default: "4.19-r25p0"
+        default: "4.19-r32p1"
         type: choice
         options:
-          - 4.19-r25p0
           - 4.19-r32p1
+          - 4.19-r25p0
           - 4.14-r25p0
       clang_version:
         description: "AOSP Clang prebuilt version"
@@ -35,7 +35,7 @@ on:
         type: boolean
 
 env:
-  TRACK: ${{ inputs.track || '4.19-r25p0' }}
+  TRACK: ${{ inputs.track || '4.19-r32p1' }}
   CLANG_VERSION: ${{ inputs.clang_version || 'r487747c' }}
   ENABLE_414_SPOOF: ${{ inputs.enable_414_bpfload_uname_spoof || 'false' }}
 

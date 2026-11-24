@@ -66,7 +66,6 @@ REQUIRED_Y_SYMBOLS = (
 
 REQUIRED_419_Y_SYMBOLS = (
     "CONFIG_XDP_SOCKETS",
-    "CONFIG_MTK_AUDIODSP_LEGACY",
     "CONFIG_SCHED_TUNE",
     "CONFIG_UCLAMP_TASK",
     "CONFIG_UCLAMP_TASK_GROUP",
@@ -160,11 +159,25 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
                 errors.append(f"{sym}={cfg.get(sym)!r} (expected 'y')")
         if cfg.get("CONFIG_PANIC_ON_OOPS", "n") != "n":
             errors.append(f"CONFIG_PANIC_ON_OOPS={cfg.get('CONFIG_PANIC_ON_OOPS')!r} (expected 'n')")
-        if track == "4.19-r25p0" and cfg.get("CONFIG_MICROTRUST_DYNAMIC_CORE", "n") != "n":
-            errors.append(
-                f"CONFIG_MICROTRUST_DYNAMIC_CORE={cfg.get('CONFIG_MICROTRUST_DYNAMIC_CORE')!r} "
-                "(expected 'n' for stock TKLMIXM tee1 Soter_20220831 compatibility)"
-            )
+        if track == "4.19-r25p0":
+            if cfg.get("CONFIG_MTK_AUDIODSP_LEGACY") != "y":
+                errors.append(f"CONFIG_MTK_AUDIODSP_LEGACY={cfg.get('CONFIG_MTK_AUDIODSP_LEGACY')!r} (expected 'y')")
+            if cfg.get("CONFIG_MICROTRUST_DYNAMIC_CORE", "n") != "n":
+                errors.append(
+                    f"CONFIG_MICROTRUST_DYNAMIC_CORE={cfg.get('CONFIG_MICROTRUST_DYNAMIC_CORE')!r} "
+                    "(expected 'n' for stock TKLMIXM tee1 Soter_20220831 compatibility)"
+                )
+        elif track == "4.19-r32p1":
+            if cfg.get("CONFIG_MTK_AUDIODSP_LEGACY", "n") != "n":
+                errors.append(
+                    f"CONFIG_MTK_AUDIODSP_LEGACY={cfg.get('CONFIG_MTK_AUDIODSP_LEGACY')!r} "
+                    "(expected 'n' for TFFMIXM 4.19 audio_dsp ABI)"
+                )
+            if cfg.get("CONFIG_MICROTRUST_DYNAMIC_CORE") != "y":
+                errors.append(
+                    f"CONFIG_MICROTRUST_DYNAMIC_CORE={cfg.get('CONFIG_MICROTRUST_DYNAMIC_CORE')!r} "
+                    "(expected 'y' for TFFMIXM 4.19 TEEI ABI)"
+                )
 
     if cfg.get("CONFIG_LOCALVERSION") != '"-perf"':
         errors.append(f"CONFIG_LOCALVERSION={cfg.get('CONFIG_LOCALVERSION')!r} (expected '\"-perf\"')")
@@ -185,6 +198,8 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
     raw_image = gzip.decompress(img_gz_bytes)
     if meta["is_419"] and b"ufs_mtk: renamed to bootdevice" not in raw_image:
         errors.append("Compiled 4.19 Image missing 'ufs_mtk: renamed to bootdevice' patch in ufs-mediatek.c")
+    if meta["is_419"] and b"stub device registered (maj" not in raw_image:
+        errors.append("Compiled 4.19 Image missing '/dev/iorap_dev' stub driver (drivers/misc/iorap_dev.c)")
 
     m = re.search(rb"Linux version ([^\x00\r\n]+)", raw_image)
     if not m:

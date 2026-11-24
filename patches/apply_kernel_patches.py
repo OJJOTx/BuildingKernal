@@ -549,6 +549,124 @@ def _patch_419_display_charger_wifi_fixes(kernel_dir: Path) -> None:
         print(f"[PATCH] Guarded ERR_PTR dereference in {gpufreq_c}")
 
 
+IORAP_DEV_C = """\
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Minimal /dev/iorap_dev stub for HyperOS launch-boost iorapd.
+ * Prevents iorapd inside com.android.profiling APEX from exiting fatally
+ * and triggering apexd rollback reboots when proprietary iorap_dev is absent.
+ */
+
+#include <linux/cdev.h>
+#include <linux/device.h>
+#include <linux/fs.h>
+#include <linux/module.h>
+
+#define IORAP_DEV_NAME "iorap_dev"
+
+static dev_t iorap_devno;
+static struct cdev iorap_cdev;
+static struct class *iorap_class;
+
+static int iorap_open(struct inode *inode, struct file *filp)
+{
+\treturn 0;
+}
+
+static long iorap_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+\treturn -ENOTTY;
+}
+
+static char *iorap_devnode(struct device *dev, umode_t *mode)
+{
+\t*mode = 0666;
+\treturn NULL;
+}
+
+static const struct file_operations iorap_fops = {
+\t.owner          = THIS_MODULE,
+\t.open           = iorap_open,
+\t.unlocked_ioctl = iorap_ioctl,
+\t.compat_ioctl   = iorap_ioctl,
+};
+
+static int __init iorap_init(void)
+{
+\tstruct device *dev;
+\tint err;
+
+\terr = alloc_chrdev_region(&iorap_devno, 0, 1, IORAP_DEV_NAME);
+\tif (err < 0)
+\t\treturn err;
+
+\tcdev_init(&iorap_cdev, &iorap_fops);
+\tiorap_cdev.owner = THIS_MODULE;
+\terr = cdev_add(&iorap_cdev, iorap_devno, 1);
+\tif (err < 0)
+\t\tgoto err_cdev;
+
+\tiorap_class = class_create(THIS_MODULE, IORAP_DEV_NAME);
+\tif (IS_ERR(iorap_class)) {
+\t\terr = PTR_ERR(iorap_class);
+\t\tgoto err_class;
+\t}
+\tiorap_class->devnode = iorap_devnode;
+
+\tdev = device_create(iorap_class, NULL, iorap_devno, NULL, IORAP_DEV_NAME);
+\tif (IS_ERR(dev)) {
+\t\terr = PTR_ERR(dev);
+\t\tgoto err_device;
+\t}
+
+\tpr_info("%s: stub device registered (maj %d)\\n", IORAP_DEV_NAME,
+\t\tMAJOR(iorap_devno));
+\treturn 0;
+
+err_device:
+\tclass_destroy(iorap_class);
+err_class:
+\tcdev_del(&iorap_cdev);
+err_cdev:
+\tunregister_chrdev_region(iorap_devno, 1);
+\treturn err;
+}
+
+static void __exit iorap_exit(void)
+{
+\tdevice_destroy(iorap_class, iorap_devno);
+\tclass_destroy(iorap_class);
+\tcdev_del(&iorap_cdev);
+\tunregister_chrdev_region(iorap_devno, 1);
+}
+
+module_init(iorap_init);
+module_exit(iorap_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Stub /dev/iorap_dev for HyperOS launch-boost iorapd");
+"""
+
+
+def _patch_419_iorap_dev_stub(kernel_dir: Path) -> None:
+    """Add minimal /dev/iorap_dev stub so HyperOS 3 iorapd does not trigger apexd rollback reboots."""
+    misc_dir = kernel_dir / "drivers/misc"
+    iorap_c = misc_dir / "iorap_dev.c"
+    if not iorap_c.exists() or iorap_c.read_text(encoding="utf-8") != IORAP_DEV_C:
+        iorap_c.write_text(IORAP_DEV_C, encoding="utf-8")
+        print(f"[PATCH] Wrote {iorap_c}")
+
+    misc_mk = misc_dir / "Makefile"
+    mk_txt = misc_mk.read_text(encoding="utf-8")
+    if "obj-y += iorap_dev.o" not in mk_txt:
+        anchor = "obj-y += board_id.o\n"
+        if anchor in mk_txt:
+            misc_mk.write_text(mk_txt.replace(anchor, anchor + "obj-y += iorap_dev.o\n", 1), encoding="utf-8")
+        else:
+            misc_mk.write_text(mk_txt.rstrip() + "\nobj-y += iorap_dev.o\n", encoding="utf-8")
+        print(f"[PATCH] Added iorap_dev.o to {misc_mk}")
+
+
 def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
     sysc = kernel_dir / "kernel/sys.c"
     txt = sysc.read_text(encoding="utf-8")
@@ -641,6 +759,7 @@ def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) 
         _patch_419_mt6785_dts_rosemary_compat(kernel_dir)
         _patch_419_cameraisp_owe(kernel_dir)
         _patch_419_display_charger_wifi_fixes(kernel_dir)
+        _patch_419_iorap_dev_stub(kernel_dir)
         if track == "4.19-r25p0":
             _patch_419_mali_r25p0(kernel_dir)
     elif track == "4.14-r25p0" and enable_414_spoof:
