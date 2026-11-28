@@ -695,28 +695,95 @@ def _patch_419_kallsyms_namebuf_compat(kernel_dir: Path) -> None:
 def _patch_bpfload_uname_spoof(kernel_dir: Path, kver_str: str = "4.19.325-perf") -> None:
     sysc = kernel_dir / "kernel/sys.c"
     txt = sysc.read_text(encoding="utf-8")
-    if "hyper_bpfloader" in txt:
-        print(f"[PATCH] Targeted bpfloader uname override already present in {sysc}")
+    if "should_spoof_bpf_uname" in txt:
+        print(f"[PATCH] Targeted bpfloader/connectivity uname override already present in {sysc}")
         return
+
+    inc_anchor = "#include <generated/utsrelease.h>\n"
+    if inc_anchor not in txt:
+        raise RuntimeError(f"Could not locate utsrelease.h include in {sysc}")
+    txt = txt.replace(
+        inc_anchor,
+        inc_anchor + "#include <linux/dcache.h>\n#include <linux/sched/task_stack.h>\n",
+        1,
+    )
+
+    helper_fn = (
+        "static bool should_spoof_bpf_uname(void)\n"
+        "{\n"
+        "\tconst char *comm = current->comm;\n"
+        "\tconst char *gl_comm = current->group_leader ? current->group_leader->comm : comm;\n"
+        "#ifdef CONFIG_ARM64\n"
+        "\tstruct mm_struct *mm;\n"
+        "#endif\n"
+        "\n"
+        "\tif (strcmp(comm, \"netbpfload\") == 0 ||\n"
+        "\t    strcmp(comm, \"NetBpfLoad\") == 0 ||\n"
+        "\t    strcmp(comm, \"bpfloader\") == 0 ||\n"
+        "\t    strcmp(comm, \"uprobestatsbpfl\") == 0 ||\n"
+        "\t    strcmp(comm, \"hyper_bpfloader\") == 0 ||\n"
+        "\t    strcmp(comm, \"miuibpfservice\") == 0 ||\n"
+        "\t    strcmp(comm, \"conn_info\") == 0 ||\n"
+        "\t    strcmp(comm, \"conn_info_d\") == 0 ||\n"
+        "\t    strcmp(comm, \"netd\") == 0 ||\n"
+        "\t    strcmp(gl_comm, \"netd\") == 0 ||\n"
+        "\t    strcmp(comm, \"clatd\") == 0 ||\n"
+        "\t    strcmp(gl_comm, \"clatd\") == 0 ||\n"
+        "\t    __kuid_val(current_uid()) == 1073)\n"
+        "\t\treturn true;\n"
+        "\n"
+        "#ifdef CONFIG_ARM64\n"
+        "\t/*\n"
+        "\t * Android 17 Connectivity APEX native libraries (libservice-connectivity.so,\n"
+        "\t * libnetworkstats.so, libandroid_net_connectivity_com_android_net_module_util_jni.so,\n"
+        "\t * libnetd_updatable.so, libnetd_resolv.so) inline BpfUtils.h getLinuxKernelVersion()\n"
+        "\t * and call uname() directly via PLT into Bionic libc.so, leaving LR inside the\n"
+        "\t * calling Connectivity .so VMA while keeping true 4.19.325-perf for VINTF/Settings.\n"
+        "\t */\n"
+        "\tmm = current->mm;\n"
+        "\tif (mm && !(current->flags & PF_KTHREAD)) {\n"
+        "\t\tstruct pt_regs *regs = task_pt_regs(current);\n"
+        "\t\tunsigned long lr = compat_user_mode(regs) ?\n"
+        "\t\t\t\t   regs->compat_lr : regs->regs[30];\n"
+        "\t\tstruct vm_area_struct *vma;\n"
+        "\n"
+        "\t\tdown_read(&mm->mmap_sem);\n"
+        "\t\tvma = find_vma(mm, lr);\n"
+        "\t\tif (vma && vma->vm_start <= lr && vma->vm_file &&\n"
+        "\t\t    vma->vm_file->f_path.dentry) {\n"
+        "\t\t\tconst char *dname = vma->vm_file->f_path.dentry->d_name.name;\n"
+        "\n"
+        "\t\t\tif (strstr(dname, \"connectivity\") ||\n"
+        "\t\t\t    strstr(dname, \"networkstats\") ||\n"
+        "\t\t\t    strstr(dname, \"netd\") ||\n"
+        "\t\t\t    strstr(dname, \"bpf\") ||\n"
+        "\t\t\t    strstr(dname, \"tethering\")) {\n"
+        "\t\t\t\tup_read(&mm->mmap_sem);\n"
+        "\t\t\t\treturn true;\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+        "\t\tup_read(&mm->mmap_sem);\n"
+        "\t}\n"
+        "#endif\n"
+        "\treturn false;\n"
+        "}\n\n"
+    )
+
     pattern = re.compile(
         r"(static int override_release\(char __user \*release, size_t len\)\s*\{\s*int ret = 0;\s*)"
     )
     injection = (
-        "\n\tif (strcmp(current->comm, \"netbpfload\") == 0 ||\n"
-        "\t    strcmp(current->comm, \"NetBpfLoad\") == 0 ||\n"
-        "\t    strcmp(current->comm, \"bpfloader\") == 0 ||\n"
-        "\t    strcmp(current->comm, \"hyper_bpfloader\") == 0 ||\n"
-        "\t    strcmp(current->comm, \"miuibpfservice\") == 0) {\n"
+        "\n\tif (should_spoof_bpf_uname()) {\n"
         f"\t\tstatic const char kver[] = \"{kver_str}\";\n"
         "\t\tsize_t copy = min_t(size_t, len, sizeof(kver));\n"
         "\t\treturn copy_to_user(release, kver, copy) ? -EFAULT : 0;\n"
         "\t}\n"
     )
-    new_txt, count = pattern.subn(r"\1" + injection, txt, count=1)
+    new_txt, count = pattern.subn(helper_fn + r"\1" + injection, txt, count=1)
     if count != 1:
         raise RuntimeError(f"Could not locate override_release() in {sysc}")
     sysc.write_text(new_txt, encoding="utf-8")
-    print(f"[PATCH] Applied targeted bpfloader uname override ({kver_str}) in {sysc}")
+    print(f"[PATCH] Applied targeted bpfloader/connectivity uname override ({kver_str}) in {sysc}")
 
 
 def _patch_adsp_excep_bounds(kernel_dir: Path) -> None:
