@@ -670,6 +670,28 @@ def _patch_419_iorap_dev_stub(kernel_dir: Path) -> None:
         print(f"[PATCH] Added iorap_dev.o to {misc_mk}")
 
 
+def _patch_419_kallsyms_namebuf_compat(kernel_dir: Path) -> None:
+    """Restore KSYM_NAME_LEN=128 when CFI is disabled so out-of-tree MediaTek callers
+    passing 'char namebuf[128]' to kallsyms_lookup() (e.g. spm_v4/mtk_idle.c) do not
+    suffer a 64-byte stack buffer overflow from namebuf[KSYM_NAME_LEN - 1] = 0."""
+    kh = kernel_dir / "include/linux/kallsyms.h"
+    if kh.is_file():
+        ktxt = kh.read_text(encoding="utf-8")
+        if "#define KSYM_NAME_LEN 192" in ktxt:
+            kh.write_text(ktxt.replace("#define KSYM_NAME_LEN 192", "#define KSYM_NAME_LEN 128", 1), encoding="utf-8")
+            print(f"[PATCH] Restored KSYM_NAME_LEN=128 in {kh} to prevent MediaTek stack overflow")
+
+    mtk_idle = kernel_dir / "drivers/misc/mediatek/base/power/spm_v4/mtk_idle.c"
+    if mtk_idle.is_file():
+        itxt = mtk_idle.read_text(encoding="utf-8")
+        if "char namebuf[128] = {0};" in itxt:
+            mtk_idle.write_text(
+                itxt.replace("char namebuf[128] = {0};", "char namebuf[KSYM_NAME_LEN] = {0};", 1),
+                encoding="utf-8",
+            )
+            print(f"[PATCH] Fixed stack buffer size char namebuf[KSYM_NAME_LEN] in {mtk_idle}")
+
+
 def _patch_bpfload_uname_spoof(kernel_dir: Path, kver_str: str = "4.19.325-perf") -> None:
     sysc = kernel_dir / "kernel/sys.c"
     txt = sysc.read_text(encoding="utf-8")
@@ -765,6 +787,7 @@ def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) 
         _patch_419_cameraisp_owe(kernel_dir)
         _patch_419_display_charger_wifi_fixes(kernel_dir)
         _patch_419_iorap_dev_stub(kernel_dir)
+        _patch_419_kallsyms_namebuf_compat(kernel_dir)
         if track == "4.19-r25p0":
             _patch_419_mali_r25p0(kernel_dir)
         elif track == "4.19-r32p1-hos4":
