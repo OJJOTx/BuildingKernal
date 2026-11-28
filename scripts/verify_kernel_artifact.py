@@ -54,7 +54,6 @@ REQUIRED_Y_SYMBOLS = (
     "CONFIG_EROFS_FS_XATTR",
     "CONFIG_EROFS_FS_SECURITY",
     "CONFIG_EROFS_FS_ZIP",
-    "CONFIG_SDCARD_FS",
     "CONFIG_USERFAULTFD",
     "CONFIG_BPF_SYSCALL",
     "CONFIG_CGROUP_BPF",
@@ -72,7 +71,6 @@ REQUIRED_Y_SYMBOLS = (
 
 REQUIRED_419_Y_SYMBOLS = (
     "CONFIG_XDP_SOCKETS",
-    "CONFIG_SCHED_TUNE",
     "CONFIG_UCLAMP_TASK",
     "CONFIG_UCLAMP_TASK_GROUP",
     "CONFIG_PROC_UID",
@@ -158,6 +156,15 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
     for sym in REQUIRED_Y_SYMBOLS:
         if cfg.get(sym) != "y":
             errors.append(f"{sym}={cfg.get(sym)!r} (expected 'y')")
+    if track == "4.19-r32p1-hos4":
+        for sym in ("CONFIG_FUSE_FS", "CONFIG_SECURITYFS"):
+            if cfg.get(sym) != "y":
+                errors.append(f"{sym}={cfg.get(sym)!r} (expected 'y' on lineage-24.0)")
+    else:
+        if cfg.get("CONFIG_SDCARD_FS") != "y":
+            errors.append(f"CONFIG_SDCARD_FS={cfg.get('CONFIG_SDCARD_FS')!r} (expected 'y')")
+        if meta["is_419"] and cfg.get("CONFIG_SCHED_TUNE") != "y":
+            errors.append(f"CONFIG_SCHED_TUNE={cfg.get('CONFIG_SCHED_TUNE')!r} (expected 'y')")
 
     if meta["is_419"]:
         for sym in REQUIRED_419_Y_SYMBOLS:
