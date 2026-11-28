@@ -708,6 +708,10 @@ def _patch_bpfload_uname_spoof(kernel_dir: Path, kver_str: str = "4.19.325-perf"
         1,
     )
 
+    use_mmap_lock = "mmap_read_lock(" in txt
+    rd_lock = "mmap_read_lock(mm);" if use_mmap_lock else "down_read(&mm->mmap_sem);"
+    rd_unlock = "mmap_read_unlock(mm);" if use_mmap_lock else "up_read(&mm->mmap_sem);"
+
     helper_fn = (
         "static bool should_spoof_bpf_uname(void)\n"
         "{\n"
@@ -747,7 +751,7 @@ def _patch_bpfload_uname_spoof(kernel_dir: Path, kver_str: str = "4.19.325-perf"
         "\t\t\t\t   regs->compat_lr : regs->regs[30];\n"
         "\t\tstruct vm_area_struct *vma;\n"
         "\n"
-        "\t\tdown_read(&mm->mmap_sem);\n"
+        f"\t\t{rd_lock}\n"
         "\t\tvma = find_vma(mm, lr);\n"
         "\t\tif (vma && vma->vm_start <= lr && vma->vm_file &&\n"
         "\t\t    vma->vm_file->f_path.dentry) {\n"
@@ -758,11 +762,11 @@ def _patch_bpfload_uname_spoof(kernel_dir: Path, kver_str: str = "4.19.325-perf"
         "\t\t\t    strstr(dname, \"netd\") ||\n"
         "\t\t\t    strstr(dname, \"bpf\") ||\n"
         "\t\t\t    strstr(dname, \"tethering\")) {\n"
-        "\t\t\t\tup_read(&mm->mmap_sem);\n"
+        f"\t\t\t\t{rd_unlock}\n"
         "\t\t\t\treturn true;\n"
         "\t\t\t}\n"
         "\t\t}\n"
-        "\t\tup_read(&mm->mmap_sem);\n"
+        f"\t\t{rd_unlock}\n"
         "\t}\n"
         "#endif\n"
         "\treturn false;\n"
