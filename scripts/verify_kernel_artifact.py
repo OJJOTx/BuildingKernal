@@ -35,6 +35,12 @@ EXPECTED_TRACK_META = {
         "mali_compat": "arm,mali-valhall",
         "is_419": True,
     },
+    "4.19-r32p1-hos4": {
+        "kver_prefix": "4.19.",
+        "gpu_version": '"mali valhall r32p1"',
+        "mali_compat": "arm,mali-valhall",
+        "is_419": True,
+    },
     "4.14-r25p0": {
         "kver_prefix": "4.14.",
         "gpu_version": '"mali bifrost r25p0"',
@@ -167,7 +173,7 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
                     f"CONFIG_MICROTRUST_DYNAMIC_CORE={cfg.get('CONFIG_MICROTRUST_DYNAMIC_CORE')!r} "
                     "(expected 'n' for stock TKLMIXM tee1 Soter_20220831 compatibility)"
                 )
-        elif track == "4.19-r32p1":
+        elif track in ("4.19-r32p1", "4.19-r32p1-hos4"):
             if cfg.get("CONFIG_MTK_AUDIODSP_LEGACY", "n") != "n":
                 errors.append(
                     f"CONFIG_MTK_AUDIODSP_LEGACY={cfg.get('CONFIG_MTK_AUDIODSP_LEGACY')!r} "
@@ -200,6 +206,8 @@ def verify_artifacts(out_dir: Path, track: str) -> None:
         errors.append("Compiled 4.19 Image missing 'ufs_mtk: renamed to bootdevice' patch in ufs-mediatek.c")
     if meta["is_419"] and b"stub device registered (maj" not in raw_image:
         errors.append("Compiled 4.19 Image missing '/dev/iorap_dev' stub driver (drivers/misc/iorap_dev.c)")
+    if track == "4.19-r32p1-hos4" and b"5.10.239-perf" not in raw_image:
+        errors.append("Compiled 4.19-r32p1-hos4 Image missing targeted 5.10.239-perf NetBpfLoad override")
 
     m = re.search(rb"Linux version ([^\x00\r\n]+)", raw_image)
     if not m:

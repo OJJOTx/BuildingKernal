@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-VALID_TRACKS = ("4.19-r25p0", "4.19-r32p1", "4.14-r25p0")
+VALID_TRACKS = ("4.19-r25p0", "4.19-r32p1", "4.19-r32p1-hos4", "4.14-r25p0")
 
 
 def _clean_version_markers(kernel_dir: Path) -> None:
@@ -292,7 +292,10 @@ def _patch_419_cameraisp_owe(kernel_dir: Path) -> None:
 
     mk = kernel_dir / "drivers/misc/mediatek/cameraisp/Makefile"
     mk_txt = mk.read_text(encoding="utf-8")
-    if "obj-$(CONFIG_MTK_CAMERA_ISP_OWE_SUPPORT) += owe/" not in mk_txt:
+    if (
+        "obj-$(CONFIG_MTK_CAMERA_ISP_OWE_SUPPORT) += owe/" not in mk_txt
+        and "ifeq ($(CONFIG_MACH_MT6785),y)\nobj-y += owe/" not in mk_txt
+    ):
         old_owe = "#ifeq ($(CONFIG_MACH_MT6763),y)\n#obj-y += owe/\n#endif"
         if old_owe not in mk_txt:
             raise RuntimeError(f"Could not find commented owe block in {mk}")
@@ -436,7 +439,7 @@ def _patch_419_display_charger_wifi_fixes(kernel_dir: Path) -> None:
         "\t\t}\n"
         "\t}"
     )
-    if "if (!pdev->dev.dma_mem)" not in axi_txt:
+    if "if (!pdev->dev.dma_mem)" not in axi_txt and "if (ret == -EBUSY)" not in axi_txt:
         if axi_old not in axi_txt:
             raise RuntimeError(f"Could not match axiDmaSetup block in {axi}")
         axi.write_text(axi_txt.replace(axi_old, axi_new, 1), encoding="utf-8")
@@ -667,7 +670,7 @@ def _patch_419_iorap_dev_stub(kernel_dir: Path) -> None:
         print(f"[PATCH] Added iorap_dev.o to {misc_mk}")
 
 
-def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
+def _patch_bpfload_uname_spoof(kernel_dir: Path, kver_str: str = "4.19.325-perf") -> None:
     sysc = kernel_dir / "kernel/sys.c"
     txt = sysc.read_text(encoding="utf-8")
     if "hyper_bpfloader" in txt:
@@ -678,9 +681,11 @@ def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
     )
     injection = (
         "\n\tif (strcmp(current->comm, \"netbpfload\") == 0 ||\n"
+        "\t    strcmp(current->comm, \"NetBpfLoad\") == 0 ||\n"
         "\t    strcmp(current->comm, \"bpfloader\") == 0 ||\n"
-        "\t    strcmp(current->comm, \"hyper_bpfloader\") == 0) {\n"
-        "\t\tstatic const char kver[] = \"4.19.325-perf\";\n"
+        "\t    strcmp(current->comm, \"hyper_bpfloader\") == 0 ||\n"
+        "\t    strcmp(current->comm, \"miuibpfservice\") == 0) {\n"
+        f"\t\tstatic const char kver[] = \"{kver_str}\";\n"
         "\t\tsize_t copy = min_t(size_t, len, sizeof(kver));\n"
         "\t\treturn copy_to_user(release, kver, copy) ? -EFAULT : 0;\n"
         "\t}\n"
@@ -689,7 +694,7 @@ def _patch_414_bpfload_uname_spoof(kernel_dir: Path) -> None:
     if count != 1:
         raise RuntimeError(f"Could not locate override_release() in {sysc}")
     sysc.write_text(new_txt, encoding="utf-8")
-    print(f"[PATCH] Applied targeted bpfloader uname override in {sysc}")
+    print(f"[PATCH] Applied targeted bpfloader uname override ({kver_str}) in {sysc}")
 
 
 def _patch_adsp_excep_bounds(kernel_dir: Path) -> None:
@@ -754,7 +759,7 @@ def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) 
         raise ValueError(f"Unknown track {track!r}; expected one of {VALID_TRACKS}")
     _clean_version_markers(kernel_dir)
     _patch_adsp_excep_bounds(kernel_dir)
-    if track in ("4.19-r25p0", "4.19-r32p1"):
+    if track in ("4.19-r25p0", "4.19-r32p1", "4.19-r32p1-hos4"):
         _patch_419_ufs_bootdevice_rename(kernel_dir)
         _patch_419_mt6785_dts_rosemary_compat(kernel_dir)
         _patch_419_cameraisp_owe(kernel_dir)
@@ -762,8 +767,10 @@ def apply_patches(kernel_dir: Path, track: str, enable_414_spoof: bool = False) 
         _patch_419_iorap_dev_stub(kernel_dir)
         if track == "4.19-r25p0":
             _patch_419_mali_r25p0(kernel_dir)
+        elif track == "4.19-r32p1-hos4":
+            _patch_bpfload_uname_spoof(kernel_dir, kver_str="5.10.239-perf")
     elif track == "4.14-r25p0" and enable_414_spoof:
-        _patch_414_bpfload_uname_spoof(kernel_dir)
+        _patch_bpfload_uname_spoof(kernel_dir, kver_str="4.19.325-perf")
 
 
 def main() -> int:
